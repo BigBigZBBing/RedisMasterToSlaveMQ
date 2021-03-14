@@ -1,6 +1,7 @@
 ﻿using NewLife.Caching;
 using Newtonsoft.Json;
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -17,25 +18,25 @@ namespace RedisMasterToSlaveMQ
     {
         static RedisReliableQueue<string> ListContainer;
         static RedisReliableQueue<string> SlaveListContainer;
-        static FullRedis redis, slave1;
+        static FullRedis master, slave1;
         static int maxContainerNumber = 100;
         static string ListKey = "testList";
         static string[] ListKeys = new[] { ListKey + 1, ListKey + 2 };
 
         static void Main(string[] args)
         {
-            redis = new FullRedis("127.0.0.1:6379", "zbb8484284", 0);
+            master = new FullRedis("127.0.0.1:6379", "zbb8484284", 0);
             slave1 = new FullRedis("127.0.0.1:6378", "zbb8484284", 0);
-            redis.Clear();
+            master.Clear();
 
             //一个集合 保存所有的List容器
-            redis.SADD(ListKey, ListKeys);
+            master.SADD(ListKey, ListKeys);
             //容器的阀门
             for (int i = 0; i < ListKeys.Length; i++)
             {
                 bool start = false;
                 if (i == 0) start = true;
-                redis.Set(ListKeys[i], start);
+                master.Set(ListKeys[i], start);
             }
 
             IdWorker idworker = new IdWorker(1);
@@ -60,10 +61,13 @@ namespace RedisMasterToSlaveMQ
                 try
                 {
                     AssignConsumer();
-                    var message = SlaveListContainer.TakeOne(3);
-                    taskError = false;
-                    Console.WriteLine($"队列名:{SlaveListContainer.Key}[]消费:{message}");
-                    SlaveListContainer.Acknowledge(message);
+                    if (SlaveListContainer != null && SlaveListContainer.Count > 0)
+                    {
+                        var message = SlaveListContainer.Take().FirstOrDefault();
+                        taskError = false;
+                        Console.WriteLine($"队列名:{SlaveListContainer.Key}[]消费:{message}");
+                        SlaveListContainer.Acknowledge(message);
+                    }
                 }
                 catch (System.Exception ex)
                 {
@@ -72,13 +76,13 @@ namespace RedisMasterToSlaveMQ
                 }
             }
             slave1?.Dispose();
-            redis?.Dispose();
+            master?.Dispose();
         }
 
         static object _lock = new object();
         static void AssignProducer()
         {
-            var set = redis.GetSet<string>("testList");
+            var set = master.GetSet<string>("testList");
             if (ListContainer == null)
             {
                 lock (_lock)
@@ -86,8 +90,8 @@ namespace RedisMasterToSlaveMQ
                     if (ListContainer != null) return;
                     foreach (var item in set)
                     {
-                        if (redis.Get<bool>(item))
-                            ListContainer = redis.GetReliableQueue<string>(item + "BQueue");
+                        if (master.Get<bool>(item))
+                            ListContainer = master.GetReliableQueue<string>(item + "BQueue");
                     }
                 }
             }
@@ -100,10 +104,10 @@ namespace RedisMasterToSlaveMQ
                     {
                         if (item != ListContainer.Key.Replace("BQueue", ""))
                         {
-                            redis.Set(ListContainer.Key.Replace("BQueue", ""), false);
-                            ListContainer = redis.GetReliableQueue<string>(item + "BQueue");
-                            redis.Execute(item + "BQueue", client => client.Execute<string>("LTRIM", item + "BQueue", "1", "0"));
-                            redis.Set(item, true);
+                            master.Set(ListContainer.Key.Replace("BQueue", ""), false);
+                            ListContainer = master.GetReliableQueue<string>(item + "BQueue");
+                            master.Execute(item + "BQueue", client => client.Execute<string>("LTRIM", item + "BQueue", "1", "0"));
+                            master.Set(item, true);
                             return;
                         }
                     }
